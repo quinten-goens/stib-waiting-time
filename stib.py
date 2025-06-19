@@ -2,11 +2,12 @@ import streamlit as st
 import pandas as pd
 import requests
 import json
-from datetime import datetime, timezone
+from datetime import datetime
 from dateutil import parser
 from streamlit_autorefresh import st_autorefresh
 import pydeck as pdk
 import os
+from zoneinfo import ZoneInfo  # <-- Added for timezone handling
 
 # Constants
 API_KEY = os.environ['API_KEY_MIVB']
@@ -82,10 +83,11 @@ if "data" not in st.session_state:
 # Manual refresh
 if st.button("🔁 Refresh Now"):
     st.session_state.raw_results = fetch_data()
-    st.session_state.last_fetch_time = datetime.now(timezone.utc)
+    # Use Brussels timezone here:
+    st.session_state.last_fetch_time = datetime.now(ZoneInfo("Europe/Brussels"))
 
 # Auto refresh API data every 30 seconds
-now = datetime.now(timezone.utc)
+now = datetime.now(ZoneInfo("Europe/Brussels"))  # <-- Brussels timezone applied here
 if (st.session_state.last_fetch_time is None or
     (now - st.session_state.last_fetch_time).total_seconds() > REFRESH_SECONDS):
     new_data = fetch_data()
@@ -95,7 +97,6 @@ if (st.session_state.last_fetch_time is None or
 
 # Process API response
 grouped = {}
-now = datetime.now(timezone.utc)
 max_seconds = time_limit_minutes * 60
 
 for record in st.session_state.raw_results:
@@ -109,7 +110,9 @@ for record in st.session_state.raw_results:
     for pt in times:
         try:
             arrival = parser.isoparse(pt["expectedArrivalTime"])
-            wait = (arrival - now).total_seconds()
+            # Convert arrival to Brussels timezone before calculations
+            arrival_brussels = arrival.astimezone(ZoneInfo("Europe/Brussels"))
+            wait = (arrival_brussels - now).total_seconds()
             if wait > max_seconds or wait <= 0:
                 continue  # Filter out arrivals beyond time window or past
 
@@ -120,7 +123,7 @@ for record in st.session_state.raw_results:
             grouped.setdefault(stop_name, []).append({
                 "Line": line,
                 "Destination": destination,
-                "Expected Arrival": arrival.astimezone().strftime("%H:%M:%S"),
+                "Expected Arrival": arrival_brussels.strftime("%H:%M:%S"),
                 "Time Left": wait_display,
                 "Seconds Left": wait
             })
@@ -188,3 +191,6 @@ if st.session_state.get("last_stops") != selected_stops:
 if "map_chart" in st.session_state:
     with col2:
         st.pydeck_chart(st.session_state.map_chart)
+
+# Optional: show current Brussels time in sidebar for debugging
+st.sidebar.write("🕒 Current Brussels time:", now.strftime("%Y-%m-%d %H:%M:%S"))
