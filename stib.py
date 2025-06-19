@@ -18,7 +18,7 @@ TABLE_REFRESH_INTERVAL = 1000  # Refresh table every second
 # Streamlit setup
 st.set_page_config(page_title="STIB Real-Time Arrivals", layout="wide")
 st.title("🚊 STIB Real-Time Tram/Bus Arrivals")
-st.caption(f"Data refreshes every {REFRESH_SECONDS} seconds (countdown updates every {REFRESH_SECONDS}s).")
+st.caption(f"Expected arrival data refreshes every {REFRESH_SECONDS} seconds (countdown updates every second).")
 
 # Load stops CSV
 @st.cache_data
@@ -179,20 +179,9 @@ if st.session_state.get("last_stops") != selected_stops:
                 get_radius=10,
                 get_fill_color=[255, 0, 0],
                 opacity=0.8
-            ),
-            pdk.Layer(
-                "TextLayer",
-                data,
-                get_position=["lon", "lat"],
-                get_text="stop_name",
-                get_size=16,
-                get_color=[255, 255, 255],
-                get_angle=0,
-                get_text_anchor="middle",
-                get_alignment_baseline="bottom"
             )
         ],
-        map_style="mapbox://styles/mapbox/dark-v10",
+        map_style="mapbox://styles/mapbox/light-v10",
         height=600
     )
 
