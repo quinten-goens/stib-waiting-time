@@ -181,7 +181,6 @@ if st.session_state.get("last_stops") != selected_stops:
                 opacity=0.8
             )
         ],
-        map_style="mapbox://styles/mapbox/light-v10",
         height=600
     )
 
