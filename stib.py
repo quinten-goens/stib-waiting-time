@@ -6,6 +6,8 @@ from datetime import datetime, timezone
 from dateutil import parser
 from streamlit_autorefresh import st_autorefresh
 import pydeck as pdk
+import hashlib
+import colorsys
 import os
 
 # Constants
@@ -13,12 +15,45 @@ API_KEY = os.environ['API_KEY_MIVB']
 API_URL = "https://data.stib-mivb.be/api/explore/v2.1/catalog/datasets/waiting-time-rt-production/records"
 CSV_PATH = "data/gtfs-stops-production.csv"
 REFRESH_SECONDS = 30
-TABLE_REFRESH_INTERVAL = 1000  # Refresh table every second
+TABLE_REFRESH_INTERVAL = 1000
 
 # Streamlit setup
 st.set_page_config(page_title="STIB Real-Time Arrivals", layout="wide")
 st.title("🚊 STIB Real-Time Tram/Bus Arrivals")
-st.caption(f"Data refreshes every {REFRESH_SECONDS} seconds (countdown updates every {REFRESH_SECONDS}s).")
+st.caption(f"Arrival data refreshes every {REFRESH_SECONDS} seconds.")
+st_autorefresh(interval=TABLE_REFRESH_INTERVAL, key="table_refresh")
+
+# Inject CSS for tighter table columns and minimal padding, plus nowrap
+st.markdown(
+    """
+    <style>
+    div.stDataFrame > div > div > div > table {
+        table-layout: auto !important;
+    }
+    div.stDataFrame td, div.stDataFrame th {
+        padding: 4px 8px !important;
+        white-space: nowrap;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
+# Dark, distinct color function for line IDs
+def line_color_soft(line_id):
+    """
+    Generate a consistent, dark color for each line_id.
+    Darker saturation and lower brightness for readability.
+    """
+    hash_digest = hashlib.md5(line_id.encode()).hexdigest()
+    seed = int(hash_digest[:8], 16)
+
+    h = (seed % 360) / 360.0  # hue
+    s = 0.75  # higher saturation for rich color
+    v = 0.40  # lower brightness for dark colors
+    r, g, b = colorsys.hsv_to_rgb(h, s, v)
+    return '#{0:02x}{1:02x}{2:02x}'.format(int(r * 255), int(g * 255), int(b * 255))
+st.markdown("### ⏱️ Select Stops & Arrival Time Window")
 
 # Load stops CSV
 @st.cache_data
@@ -37,31 +72,23 @@ def load_stops():
             stop_dict[name] = {'IDs': [], 'Coordinates': []}
         stop_dict[name]['IDs'].append(stop_id)
         stop_dict[name]['Coordinates'].append(coords)
-
     return stop_dict
 
 stop_dict = load_stops()
 
-# UI for stop selection and time filter
+# UI Elements
 cola, colb = st.columns([2, 1])
 selected_stops = cola.multiselect("Choose stops", list(stop_dict.keys()), default=["FLAGEY", "LEVURE", "GERMOIR", "WERY"])
 time_limit_minutes = colb.slider("Only show arrivals within the next X minutes", min_value=1, max_value=30, value=5)
 
 if not selected_stops:
-    st.warning("Select at least one stop to display arrival info.")
+    st.warning("Select at least one stop.")
     st.stop()
 
 # Prepare API call
 pointids = [pid for stop in selected_stops for pid in stop_dict[stop]['IDs']]
 where_clause = "pointid IN (" + ",".join([f'"{pid}"' for pid in pointids]) + ")"
-params = {
-    "apikey": API_KEY,
-    "where": where_clause,
-    "limit": 100
-}
-
-# Auto refresh table every second
-st_autorefresh(interval=TABLE_REFRESH_INTERVAL, key="table_refresh")
+params = {"apikey": API_KEY, "where": where_clause, "limit": 100}
 
 # Fetch API data
 def fetch_data():
@@ -73,18 +100,15 @@ def fetch_data():
         st.error(f"API error: {e}")
         return []
 
-# Session state for storing data
-if "data" not in st.session_state:
-    st.session_state.data = []
-    st.session_state.last_fetch_time = None
+# Session state for data
+if "raw_results" not in st.session_state:
     st.session_state.raw_results = []
+    st.session_state.last_fetch_time = None
 
-# Manual refresh
 if st.button("🔁 Refresh Now"):
     st.session_state.raw_results = fetch_data()
     st.session_state.last_fetch_time = datetime.now(timezone.utc)
 
-# Auto refresh API data every 30 seconds
 now = datetime.now(timezone.utc)
 if (st.session_state.last_fetch_time is None or
     (now - st.session_state.last_fetch_time).total_seconds() > REFRESH_SECONDS):
@@ -93,9 +117,11 @@ if (st.session_state.last_fetch_time is None or
         st.session_state.raw_results = new_data
         st.session_state.last_fetch_time = now
 
+# Display tables in two-column rows
+st.markdown("## 🚌 Upcoming Arrivals by Stop")
+
 # Process API response
 grouped = {}
-now = datetime.now(timezone.utc)
 max_seconds = time_limit_minutes * 60
 
 for record in st.session_state.raw_results:
@@ -103,19 +129,22 @@ for record in st.session_state.raw_results:
     line = record["lineid"]
     try:
         times = json.loads(record["passingtimes"])
-    except Exception:
+    except:
         continue
 
     for pt in times:
         try:
             arrival = parser.isoparse(pt["expectedArrivalTime"])
             wait = (arrival - now).total_seconds()
-            if wait > max_seconds or wait <= 0:
-                continue  # Filter out arrivals beyond time window or past
-
-            wait_display = f"{int(wait // 60)}m {int(wait % 60)}s"
-            destination = pt.get("destination", {}).get("fr", "Unknown")
             stop_name = next((name for name, data in stop_dict.items() if pointid in data['IDs']), pointid)
+            destination = pt.get("destination", {}).get("fr", "Unknown")
+
+            if wait <= 0 and wait >= -30:
+                wait_display = "⬇⬇"
+            elif wait > max_seconds or wait <= -30:
+                continue
+            else:
+                wait_display = f"{int(wait // 60)}m {int(wait % 60)}s"
 
             grouped.setdefault(stop_name, []).append({
                 "Line": line,
@@ -124,79 +153,81 @@ for record in st.session_state.raw_results:
                 "Time Left": wait_display,
                 "Seconds Left": wait
             })
-        except Exception:
+        except:
             continue
 
-# Layout with columns: Table on the left, Map on the right
-col1, col2 = st.columns([2, 1])
+# === Line filter UI with 'Select All Lines' button next to it ===
+all_lines = sorted(set(r["Line"] for arrivals in grouped.values() for r in arrivals))
 
-with col1:
-    for stop_name in selected_stops:
-        st.subheader(f"🛑 {stop_name}")
+if "selected_lines" not in st.session_state:
+    st.session_state.selected_lines = all_lines
+else:
+    # Remove any lines no longer available to avoid Streamlit errors
+    filtered_selected = [line for line in st.session_state.selected_lines if line in all_lines]
+    if set(filtered_selected) != set(st.session_state.selected_lines):
+        st.session_state.selected_lines = filtered_selected
+
+col_line_filter, col_button = st.columns([5, 1])
+
+with col_button:
+    if st.button("Select All Lines"):
+        st.session_state.selected_lines = all_lines
+
+with col_line_filter:
+    selected_lines = st.multiselect("Filter by line", all_lines, default=st.session_state.selected_lines)
+
+if selected_lines != st.session_state.selected_lines:
+    st.session_state.selected_lines = selected_lines
+# ===============================================================
+
+for i in range(0, len(selected_stops), 2):
+    col1, col2 = st.columns(2)
+    for j, col in enumerate([col1, col2]):
+        if i + j >= len(selected_stops):
+            continue
+        stop_name = selected_stops[i + j]
         arrivals = grouped.get(stop_name, [])
-        if arrivals:
-            df = pd.DataFrame(arrivals).sort_values("Seconds Left")
-            df = df[["Line", "Destination", "Expected Arrival", "Time Left"]]
-            st.table(df)
-        else:
-            st.info("No upcoming vehicles at this stop within the selected time range.")
+        filtered = [a for a in arrivals if a["Line"] in st.session_state.selected_lines]
 
-# Only regenerate and store the map when the selected stops change
+        with col:
+            st.subheader(f"🛑 {stop_name}")
+            if filtered:
+                df = pd.DataFrame(filtered).sort_values("Seconds Left")
+                df = df[["Line", "Destination", "Expected Arrival", "Time Left"]]
+
+                def style_line(val):
+                    color = line_color_soft(str(val))
+                    return f"color: white; background-color: {color}"
+
+                st.dataframe(df.style.applymap(style_line, subset=["Line"]), use_container_width=True)
+            else:
+                st.info("No arrivals in selected time range or line.")
+
+# Render map at the bottom
 if st.session_state.get("last_stops") != selected_stops:
     st.session_state.last_stops = selected_stops
+    data, lats, lons = [], [], []
+    for stop in selected_stops:
+        for coords in stop_dict[stop]["Coordinates"]:
+            lats.append(coords[0])
+            lons.append(coords[1])
+            data.append({"lat": coords[0], "lon": coords[1], "stop_name": stop})
 
-    # Build the data
-    data, latitudes, longitudes = [], [], []
-    for stop_name in selected_stops:
-        for coords in stop_dict[stop_name]['Coordinates']:
-            latitudes.append(coords[0])
-            longitudes.append(coords[1])
-            data.append({'lat': coords[0], 'lon': coords[1], 'stop_name': stop_name})
-
-    center_lat = sum(latitudes) / len(latitudes)
-    center_lon = sum(longitudes) / len(longitudes)
-    lat_diff = max(latitudes) - min(latitudes)
-    lon_diff = max(longitudes) - min(longitudes)
-
-    zoom_level = 14
-    if lat_diff > 0.05 or lon_diff > 0.05:
-        zoom_level = 11
-    if lat_diff > 0.1 or lon_diff > 0.1:
-        zoom_level = 10
+    center_lat = sum(lats) / len(lats)
+    center_lon = sum(lons) / len(lons)
+    zoom = 14 if max(lats) - min(lats) < 0.05 else 11
 
     st.session_state.map_chart = pdk.Deck(
-        initial_view_state=pdk.ViewState(
-            latitude=center_lat,
-            longitude=center_lon,
-            zoom=zoom_level,
-            pitch=0
-        ),
+        initial_view_state=pdk.ViewState(latitude=center_lat, longitude=center_lon, zoom=zoom),
         layers=[
-            pdk.Layer(
-                "ScatterplotLayer",
-                data,
-                get_position=["lon", "lat"],
-                get_radius=10,
-                get_fill_color=[255, 0, 0],
-                opacity=0.8
-            ),
-            pdk.Layer(
-                "TextLayer",
-                data,
-                get_position=["lon", "lat"],
-                get_text="stop_name",
-                get_size=16,
-                get_color=[255, 255, 255],
-                get_angle=0,
-                get_text_anchor="middle",
-                get_alignment_baseline="bottom"
-            )
+            pdk.Layer("ScatterplotLayer", data, get_position=["lon", "lat"], get_radius=10,
+                      get_fill_color=[255, 0, 0], opacity=0.8),
+            pdk.Layer("TextLayer", data, get_position=["lon", "lat"], get_text="stop_name",
+                      get_size=16, get_color=[255, 255, 255])
         ],
-        map_style="mapbox://styles/mapbox/dark-v10",
-        height=600
+        map_style="mapbox://styles/mapbox/dark-v10", height=600
     )
 
-# Only render the map if it exists in session state
+st.markdown("## 🗺️ Stop Locations Map")
 if "map_chart" in st.session_state:
-    with col2:
-        st.pydeck_chart(st.session_state.map_chart)
+    st.pydeck_chart(st.session_state.map_chart)
