@@ -2,13 +2,14 @@ import streamlit as st
 import pandas as pd
 import requests
 import json
-from datetime import datetime, timezone
+from datetime import datetime
 from dateutil import parser
 from streamlit_autorefresh import st_autorefresh
 import pydeck as pdk
 import hashlib
 import colorsys
 import os
+from zoneinfo import ZoneInfo  # <-- Added for timezone handling
 
 # Constants
 API_KEY = os.environ['API_KEY_MIVB']
@@ -107,9 +108,13 @@ if "raw_results" not in st.session_state:
 
 if st.button("🔁 Refresh Now"):
     st.session_state.raw_results = fetch_data()
-    st.session_state.last_fetch_time = datetime.now(timezone.utc)
+    # Use Brussels timezone here:
+    st.session_state.last_fetch_time = datetime.now(ZoneInfo("Europe/Brussels"))
 
-now = datetime.now(timezone.utc)
+
+# Auto refresh API data every 30 seconds
+now = datetime.now(ZoneInfo("Europe/Brussels"))  # <-- Brussels timezone applied here
+
 if (st.session_state.last_fetch_time is None or
     (now - st.session_state.last_fetch_time).total_seconds() > REFRESH_SECONDS):
     new_data = fetch_data()
@@ -135,7 +140,14 @@ for record in st.session_state.raw_results:
     for pt in times:
         try:
             arrival = parser.isoparse(pt["expectedArrivalTime"])
-            wait = (arrival - now).total_seconds()
+            # Convert arrival to Brussels timezone before calculations
+            arrival_brussels = arrival.astimezone(ZoneInfo("Europe/Brussels"))
+            wait = (arrival_brussels - now).total_seconds()
+            if wait > max_seconds or wait <= 0:
+                continue  # Filter out arrivals beyond time window or past
+
+            wait_display = f"{int(wait // 60)}m {int(wait % 60)}s"
+            destination = pt.get("destination", {}).get("fr", "Unknown")
             stop_name = next((name for name, data in stop_dict.items() if pointid in data['IDs']), pointid)
             destination = pt.get("destination", {}).get("fr", "Unknown")
 
@@ -149,7 +161,7 @@ for record in st.session_state.raw_results:
             grouped.setdefault(stop_name, []).append({
                 "Line": line,
                 "Destination": destination,
-                "Expected Arrival": arrival.astimezone().strftime("%H:%M:%S"),
+                "Expected Arrival": arrival_brussels.strftime("%H:%M:%S"),
                 "Time Left": wait_display,
                 "Seconds Left": wait
             })
@@ -199,7 +211,7 @@ for i in range(0, len(selected_stops), 2):
                     color = line_color_soft(str(val))
                     return f"color: white; background-color: {color}"
 
-                st.dataframe(df.style.applymap(style_line, subset=["Line"]), use_container_width=True)
+                st.dataframe(df.style.map(style_line, subset=["Line"]), use_container_width=True)
             else:
                 st.info("No arrivals in selected time range or line.")
 
@@ -220,6 +232,7 @@ if st.session_state.get("last_stops") != selected_stops:
     st.session_state.map_chart = pdk.Deck(
         initial_view_state=pdk.ViewState(latitude=center_lat, longitude=center_lon, zoom=zoom),
         layers=[
+
             pdk.Layer("ScatterplotLayer", data, get_position=["lon", "lat"], get_radius=10,
                       get_fill_color=[255, 0, 0], opacity=0.8),
             pdk.Layer("TextLayer", data, get_position=["lon", "lat"], get_text="stop_name",

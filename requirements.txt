@@ -1,0 +1,7 @@
+streamlit
+pandas
+requests
+python-dateutil
+streamlit-autorefresh
+pydeck
+plotly
