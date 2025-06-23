@@ -5,11 +5,11 @@ import json
 from datetime import datetime
 from dateutil import parser
 from streamlit_autorefresh import st_autorefresh
-import pydeck as pdk
 import hashlib
 import colorsys
 import os
-from zoneinfo import ZoneInfo  # <-- Added for timezone handling
+from zoneinfo import ZoneInfo  # For timezone handling
+import plotly.express as px  # <-- Plotly import
 
 # Constants
 API_KEY = os.environ['API_KEY_MIVB']
@@ -54,7 +54,8 @@ def line_color_soft(line_id):
     v = 0.40  # lower brightness for dark colors
     r, g, b = colorsys.hsv_to_rgb(h, s, v)
     return '#{0:02x}{1:02x}{2:02x}'.format(int(r * 255), int(g * 255), int(b * 255))
-st.markdown("### ⏱️ Select Stops & Arrival Time Window")
+
+st.markdown("## ⏱️ Select Stops & Arrival Time Window")
 
 # Load stops CSV
 @st.cache_data
@@ -108,12 +109,10 @@ if "raw_results" not in st.session_state:
 
 if st.button("🔁 Refresh Now"):
     st.session_state.raw_results = fetch_data()
-    # Use Brussels timezone here:
     st.session_state.last_fetch_time = datetime.now(ZoneInfo("Europe/Brussels"))
 
-
 # Auto refresh API data every 30 seconds
-now = datetime.now(ZoneInfo("Europe/Brussels"))  # <-- Brussels timezone applied here
+now = datetime.now(ZoneInfo("Europe/Brussels"))
 
 if (st.session_state.last_fetch_time is None or
     (now - st.session_state.last_fetch_time).total_seconds() > REFRESH_SECONDS):
@@ -140,7 +139,6 @@ for record in st.session_state.raw_results:
     for pt in times:
         try:
             arrival = parser.isoparse(pt["expectedArrivalTime"])
-            # Convert arrival to Brussels timezone before calculations
             arrival_brussels = arrival.astimezone(ZoneInfo("Europe/Brussels"))
             wait = (arrival_brussels - now).total_seconds()
             if wait > max_seconds or wait <= 0:
@@ -149,7 +147,6 @@ for record in st.session_state.raw_results:
             wait_display = f"{int(wait // 60)}m {int(wait % 60)}s"
             destination = pt.get("destination", {}).get("fr", "Unknown")
             stop_name = next((name for name, data in stop_dict.items() if pointid in data['IDs']), pointid)
-            destination = pt.get("destination", {}).get("fr", "Unknown")
 
             if wait <= 0 and wait >= -30:
                 wait_display = "⬇⬇"
@@ -174,7 +171,6 @@ all_lines = sorted(set(r["Line"] for arrivals in grouped.values() for r in arriv
 if "selected_lines" not in st.session_state:
     st.session_state.selected_lines = all_lines
 else:
-    # Remove any lines no longer available to avoid Streamlit errors
     filtered_selected = [line for line in st.session_state.selected_lines if line in all_lines]
     if set(filtered_selected) != set(st.session_state.selected_lines):
         st.session_state.selected_lines = filtered_selected
@@ -215,32 +211,38 @@ for i in range(0, len(selected_stops), 2):
             else:
                 st.info("No arrivals in selected time range or line.")
 
-# Render map at the bottom
+# Render map at the bottom with Plotly instead of pydeck
 if st.session_state.get("last_stops") != selected_stops:
     st.session_state.last_stops = selected_stops
-    data, lats, lons = [], [], []
+    data = []
     for stop in selected_stops:
         for coords in stop_dict[stop]["Coordinates"]:
-            lats.append(coords[0])
-            lons.append(coords[1])
             data.append({"lat": coords[0], "lon": coords[1], "stop_name": stop})
 
-    center_lat = sum(lats) / len(lats)
-    center_lon = sum(lons) / len(lons)
-    zoom = 14 if max(lats) - min(lats) < 0.05 else 11
+    df_map = pd.DataFrame(data)
 
-    st.session_state.map_chart = pdk.Deck(
-        initial_view_state=pdk.ViewState(latitude=center_lat, longitude=center_lon, zoom=zoom),
-        layers=[
+    center_lat = df_map["lat"].mean()
+    center_lon = df_map["lon"].mean()
 
-            pdk.Layer("ScatterplotLayer", data, get_position=["lon", "lat"], get_radius=10,
-                      get_fill_color=[255, 0, 0], opacity=0.8),
-            pdk.Layer("TextLayer", data, get_position=["lon", "lat"], get_text="stop_name",
-                      get_size=16, get_color=[255, 255, 255])
-        ],
-        map_style="mapbox://styles/mapbox/dark-v10", height=600
+    fig = px.scatter_mapbox(
+        df_map,
+        lat="lat",
+        lon="lon",
+        size_max = 2000,
+        hover_name="stop_name",
+        text="stop_name",
+        zoom=15 if df_map["lat"].max() - df_map["lat"].min() < 0.05 else 12,
+        height=600,
     )
+
+    fig.update_layout(
+        mapbox_style="carto-darkmatter",
+        margin={"r":0,"t":0,"l":0,"b":0},
+    )
+    fig.update_traces(marker=dict(size=20, color = 'red'))
+
+    st.session_state.map_chart = fig
 
 st.markdown("## 🗺️ Stop Locations Map")
 if "map_chart" in st.session_state:
-    st.pydeck_chart(st.session_state.map_chart)
+    st.plotly_chart(st.session_state.map_chart, use_container_width=True)
