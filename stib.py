@@ -83,7 +83,7 @@ def line_color_soft(line_id: str) -> str:
 
 
 # --- Streamlit App Setup ---
-st.set_page_config(page_title="🚊 STIB Real-Time Tram/Bus Arrivals", layout="wide")
+st.set_page_config(layout="wide")
 st_autorefresh(interval=TABLE_REFRESH_INTERVAL, key="table_refresh")
 
 # Load stops once
