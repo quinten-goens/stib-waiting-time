@@ -210,7 +210,6 @@ with st.sidebar:
         st.session_state.selected_lines = all_lines.copy()
 
 # Main: display arrival tables
-st.title("🚌 Upcoming Arrivals by Stop")
 for i in range(0, len(selected_stops), 2):
     c1, c2 = st.columns(2)
     for offset, col in enumerate((c1, c2)):
@@ -278,6 +277,6 @@ if st.session_state.get("last_stops") != selected_stops:
     fig.update_traces(marker=dict(size=20, color="red"))
     st.session_state.map_chart = fig
 
-st.markdown("## 🗺️ Stop Locations Map")
-if "map_chart" in st.session_state:
-    st.plotly_chart(st.session_state.map_chart, use_container_width=True)
+#st.markdown("## 🗺️ Stop Locations Map")
+#if "map_chart" in st.session_state:
+#    st.plotly_chart(st.session_state.map_chart, use_container_width=True)
