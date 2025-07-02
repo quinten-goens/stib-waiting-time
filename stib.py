@@ -1,246 +1,281 @@
+import os
+import json
+import hashlib
+import colorsys
+from datetime import datetime
+from zoneinfo import ZoneInfo
+from dateutil import parser
+
 import streamlit as st
 import pandas as pd
 import requests
-import json
-from datetime import datetime
-from dateutil import parser
+import plotly.express as px
 from streamlit_autorefresh import st_autorefresh
-import hashlib
-import colorsys
-import os
-from zoneinfo import ZoneInfo  # For timezone handling
-import plotly.express as px  # <-- Plotly import
 
 # Constants
-API_KEY = os.environ['API_KEY_MIVB']
-API_URL = "https://data.stib-mivb.be/api/explore/v2.1/catalog/datasets/waiting-time-rt-production/records"
-CSV_PATH = "data/gtfs-stops-production.csv"
-REFRESH_SECONDS = 30
-TABLE_REFRESH_INTERVAL = 1000
-
-# Streamlit setup
-st.set_page_config(page_title="STIB Real-Time Arrivals", layout="wide")
-st.title("🚊 STIB Real-Time Tram/Bus Arrivals")
-st.caption(f"Arrival data refreshes every {REFRESH_SECONDS} seconds.")
-st_autorefresh(interval=TABLE_REFRESH_INTERVAL, key="table_refresh")
-
-# Inject CSS for tighter table columns and minimal padding, plus nowrap
-st.markdown(
-    """
-    <style>
-    div.stDataFrame > div > div > div > table {
-        table-layout: auto !important;
-    }
-    div.stDataFrame td, div.stDataFrame th {
-        padding: 4px 8px !important;
-        white-space: nowrap;
-    }
-    </style>
-    """,
-    unsafe_allow_html=True,
+API_KEY = os.environ["API_KEY_MIVB"]
+API_URL = (
+    "https://data.stib-mivb.be/api/explore/v2.1/catalog/"
+    "datasets/waiting-time-rt-production/records"
 )
+CSV_PATH = "data/gtfs-stops-production.csv"
+REFRESH_SECONDS = 30  # seconds between data fetches
+TABLE_REFRESH_INTERVAL = 1000  # ms for Streamlit widget reruns
 
-# Dark, distinct color function for line IDs
-def line_color_soft(line_id):
+
+def get_current_time_str() -> str:
     """
-    Generate a consistent, dark color for each line_id.
-    Darker saturation and lower brightness for readability.
+    Return the current time in Europe/Brussels as HH:MM:SS.
     """
-    hash_digest = hashlib.md5(line_id.encode()).hexdigest()
-    seed = int(hash_digest[:8], 16)
+    now = datetime.now(ZoneInfo("Europe/Brussels"))
+    return now.strftime("%H:%M:%S")
 
-    h = (seed % 360) / 360.0  # hue
-    s = 0.75  # higher saturation for rich color
-    v = 0.40  # lower brightness for dark colors
-    r, g, b = colorsys.hsv_to_rgb(h, s, v)
-    return '#{0:02x}{1:02x}{2:02x}'.format(int(r * 255), int(g * 255), int(b * 255))
 
-st.markdown("## ⏱️ Select Stops & Arrival Time Window")
-
-# Load stops CSV
 @st.cache_data
-def load_stops():
-    df = pd.read_csv(CSV_PATH, sep=';')
-    df = df[['ID', 'Name', 'Coordinates']].dropna()
-    df = df[df['ID'].astype(str).str.isnumeric()]
-    df['Coordinates'] = df['Coordinates'].apply(lambda x: tuple(map(float, x.split(','))))
+def load_stops() -> dict[str, dict[str, list]]:
+    """
+    Load stops from CSV and return a mapping:
+    { stop_name: { "IDs": [...], "Coordinates": [...] } }
+    """
+    df = pd.read_csv(CSV_PATH, sep=";")
+    df = df[["ID", "Name", "Coordinates"]].dropna()
+    df = df[df["ID"].astype(str).str.isnumeric()]
+    df["Coordinates"] = df["Coordinates"].apply(
+        lambda x: tuple(map(float, x.split(",")))
+    )
 
-    stop_dict = {}
+    stop_dict: dict[str, dict[str, list]] = {}
     for _, row in df.iterrows():
-        name = row['Name']
-        stop_id = str(row['ID'])
-        coords = row['Coordinates']
-        if name not in stop_dict:
-            stop_dict[name] = {'IDs': [], 'Coordinates': []}
-        stop_dict[name]['IDs'].append(stop_id)
-        stop_dict[name]['Coordinates'].append(coords)
+        name = row["Name"]
+        stop_id = str(row["ID"])
+        coords = row["Coordinates"]
+        stop_dict.setdefault(name, {"IDs": [], "Coordinates": []})
+        stop_dict[name]["IDs"].append(stop_id)
+        stop_dict[name]["Coordinates"].append(coords)
     return stop_dict
 
-stop_dict = load_stops()
 
-# UI Elements
-cola, colb = st.columns([2, 1])
-selected_stops = cola.multiselect("Choose stops", list(stop_dict.keys()), default=["FLAGEY", "LEVURE", "GERMOIR", "WERY"])
-time_limit_minutes = colb.slider("Only show arrivals within the next X minutes", min_value=1, max_value=30, value=5)
-
-if not selected_stops:
-    st.warning("Select at least one stop.")
-    st.stop()
-
-# Prepare API call
-pointids = [pid for stop in selected_stops for pid in stop_dict[stop]['IDs']]
-where_clause = "pointid IN (" + ",".join([f'"{pid}"' for pid in pointids]) + ")"
-params = {"apikey": API_KEY, "where": where_clause, "limit": 100}
-
-# Fetch API data
-def fetch_data():
+def fetch_data(pointids: list[str]) -> list[dict]:
+    """
+    Fetch real-time arrival data for the given point IDs.
+    """
+    where_clause = "pointid IN (" + ",".join(f'"{pid}"' for pid in pointids) + ")"
+    params = {"apikey": API_KEY, "where": where_clause, "limit": 100}
     try:
-        response = requests.get(API_URL, params=params)
-        response.raise_for_status()
-        return response.json().get("results", [])
+        resp = requests.get(API_URL, params=params)
+        resp.raise_for_status()
+        return resp.json().get("results", [])
     except Exception as e:
         st.error(f"API error: {e}")
         return []
 
-# Session state for data
+
+def line_color_soft(line_id: str) -> str:
+    """
+    Generate a consistent dark color per line ID for styling.
+    """
+    digest = hashlib.md5(line_id.encode()).hexdigest()
+    seed = int(digest[:8], 16)
+    h = (seed % 360) / 360.0
+    s, v = 0.75, 0.40
+    r, g, b = colorsys.hsv_to_rgb(h, s, v)
+    return "#{:02x}{:02x}{:02x}".format(int(r * 255), int(g * 255), int(b * 255))
+
+
+# --- Streamlit App Setup ---
+st.set_page_config(page_title="🚊 STIB Real-Time Tram/Bus Arrivals", layout="wide")
+st_autorefresh(interval=TABLE_REFRESH_INTERVAL, key="table_refresh")
+
+# Load stops once
+stop_dict = load_stops()
+
+# Sidebar: Time & Stop Controls
+with st.sidebar:
+    st.title(f"**Current time:** {get_current_time_str()}")
+    st.caption(f"Arrival data refreshes every {REFRESH_SECONDS} seconds.")
+    st.title("Controls")
+
+    selected_stops = st.multiselect(
+        "Choose stops",
+        list(stop_dict.keys()),
+        default=["LEVURE", "GERMOIR", "FLAGEY", "WERY"],
+    )
+    time_limit_minutes = st.slider(
+        "Only show arrivals within the next X minutes",
+        min_value=1,
+        max_value=60,
+        value=15,
+    )
+
+    if not selected_stops:
+        st.warning("Select at least one stop.")
+        st.stop()
+
+# Compute point IDs
+pointids = [pid for stop in selected_stops for pid in stop_dict[stop]["IDs"]]
+
+# Initialize session state
 if "raw_results" not in st.session_state:
     st.session_state.raw_results = []
     st.session_state.last_fetch_time = None
 
-if st.button("🔁 Refresh Now"):
-    st.session_state.raw_results = fetch_data()
-    st.session_state.last_fetch_time = datetime.now(ZoneInfo("Europe/Brussels"))
-
-# Auto refresh API data every 30 seconds
+# Auto-refresh data if stale
 now = datetime.now(ZoneInfo("Europe/Brussels"))
-
-if (st.session_state.last_fetch_time is None or
-    (now - st.session_state.last_fetch_time).total_seconds() > REFRESH_SECONDS):
-    new_data = fetch_data()
-    if set(map(json.dumps, new_data)) != set(map(json.dumps, st.session_state.raw_results)):
+if (
+    st.session_state.last_fetch_time is None
+    or (now - st.session_state.last_fetch_time).total_seconds()
+    > REFRESH_SECONDS
+):
+    new_data = fetch_data(pointids)
+    if set(map(json.dumps, new_data)) != set(
+        map(json.dumps, st.session_state.raw_results)
+    ):
         st.session_state.raw_results = new_data
         st.session_state.last_fetch_time = now
 
-# Display tables in two-column rows
-st.markdown("## 🚌 Upcoming Arrivals by Stop")
-
-# Process API response
-grouped = {}
+# Process fetched data into grouped by stop
+grouped: dict[str, list[dict]] = {}
 max_seconds = time_limit_minutes * 60
-
 for record in st.session_state.raw_results:
-    pointid = record["pointid"]
-    line = record["lineid"]
+    pid = record.get("pointid")
+    line = record.get("lineid")
     try:
-        times = json.loads(record["passingtimes"])
-    except:
+        times = json.loads(record.get("passingtimes", "[]"))
+    except json.JSONDecodeError:
         continue
 
     for pt in times:
+        iso = pt.get("expectedArrivalTime")
+        if not iso:
+            continue
         try:
-            arrival = parser.isoparse(pt["expectedArrivalTime"])
-            arrival_brussels = arrival.astimezone(ZoneInfo("Europe/Brussels"))
-            wait = (arrival_brussels - now).total_seconds()
-            if wait > max_seconds or wait <= 0:
-                continue  # Filter out arrivals beyond time window or past
+            arrival = (
+                parser.isoparse(iso)
+                .astimezone(ZoneInfo("Europe/Brussels"))
+            )
+            wait = (arrival - now).total_seconds()
+        except Exception:
+            continue
 
-            wait_display = f"{int(wait // 60)}m {int(wait % 60)}s"
-            destination = pt.get("destination", {}).get("fr", "Unknown")
-            stop_name = next((name for name, data in stop_dict.items() if pointid in data['IDs']), pointid)
+        if not (0 < wait <= max_seconds):
+            continue
 
-            if wait <= 0 and wait >= -30:
-                wait_display = "⬇⬇"
-            elif wait > max_seconds or wait <= -30:
-                continue
-            else:
-                wait_display = f"{int(wait // 60)}m {int(wait % 60)}s"
-
-            grouped.setdefault(stop_name, []).append({
+        stop_name = next(
+            (n for n, d in stop_dict.items() if pid in d["IDs"]), pid
+        )
+        grouped.setdefault(stop_name, []).append(
+            {
                 "Line": line,
-                "Destination": destination,
-                "Expected Arrival": arrival_brussels.strftime("%H:%M:%S"),
-                "Time Left": wait_display,
-                "Seconds Left": wait
-            })
-        except:
-            continue
+                "Destination": pt.get("destination", {}).get("fr", "Unknown"),
+                "Expected Arrival": arrival.strftime("%H:%M:%S"),
+                "Time Left": f"{int(wait//60)}m {int(wait%60)}s",
+                "Seconds Left": wait,
+            }
+        )
 
-# === Line filter UI with 'Select All Lines' button next to it ===
-all_lines = sorted(set(r["Line"] for arrivals in grouped.values() for r in arrivals))
+# Sidebar: Line filter + buttons at bottom
+with st.sidebar:
+    all_lines = sorted(
+        {item["Line"] for arr in grouped.values() for item in arr}
+    )
 
-if "selected_lines" not in st.session_state:
-    st.session_state.selected_lines = all_lines
-else:
-    filtered_selected = [line for line in st.session_state.selected_lines if line in all_lines]
-    if set(filtered_selected) != set(st.session_state.selected_lines):
-        st.session_state.selected_lines = filtered_selected
+    # On first real data load, select all by default once
+    if not st.session_state.get("lines_initialized", False) and all_lines:
+        st.session_state.selected_lines = all_lines.copy()
+        st.session_state.lines_initialized = True
+    else:
+        # Filter out any no-longer-available lines
+        st.session_state.selected_lines = [
+            l
+            for l in st.session_state.get("selected_lines", [])
+            if l in all_lines
+        ]
 
-col_line_filter, col_button = st.columns([5, 1])
-
-with col_button:
-    if st.button("Select All Lines"):
-        st.session_state.selected_lines = all_lines
-
-with col_line_filter:
-    selected_lines = st.multiselect("Filter by line", all_lines, default=st.session_state.selected_lines)
-
-if selected_lines != st.session_state.selected_lines:
+    # Multiselect with default = whatever is in session_state
+    selected_lines = st.multiselect(
+        "Filter by line",
+        all_lines,
+        default=st.session_state.selected_lines,
+    )
     st.session_state.selected_lines = selected_lines
-# ===============================================================
 
-for i in range(0, len(selected_stops), 2):
+    st.markdown("---")
     col1, col2 = st.columns(2)
-    for j, col in enumerate([col1, col2]):
-        if i + j >= len(selected_stops):
+    if col1.button("🔁 Refresh Now"):
+        st.session_state.raw_results = fetch_data(pointids)
+        st.session_state.last_fetch_time = datetime.now(
+            ZoneInfo("Europe/Brussels")
+        )
+    if col2.button("Select All Lines"):
+        st.session_state.selected_lines = all_lines.copy()
+
+# Main: display arrival tables
+st.title("🚌 Upcoming Arrivals by Stop")
+for i in range(0, len(selected_stops), 2):
+    c1, c2 = st.columns(2)
+    for offset, col in enumerate((c1, c2)):
+        idx = i + offset
+        if idx >= len(selected_stops):
             continue
-        stop_name = selected_stops[i + j]
+        stop_name = selected_stops[idx]
         arrivals = grouped.get(stop_name, [])
-        filtered = [a for a in arrivals if a["Line"] in st.session_state.selected_lines]
+        filtered = [
+            a
+            for a in arrivals
+            if a["Line"] in st.session_state.selected_lines
+        ]
 
         with col:
             st.subheader(f"🛑 {stop_name}")
             if filtered:
-                df = pd.DataFrame(filtered).sort_values("Seconds Left")
-                df = df[["Line", "Destination", "Expected Arrival", "Time Left"]]
-
-                def style_line(val):
-                    color = line_color_soft(str(val))
-                    return f"color: white; background-color: {color}"
-
-                st.dataframe(df.style.map(style_line, subset=["Line"]), use_container_width=True)
+                df = (
+                    pd.DataFrame(filtered)
+                    .sort_values("Seconds Left")
+                    .loc[
+                        :, 
+                        [
+                            "Line",
+                            "Destination",
+                            "Expected Arrival",
+                            "Time Left",
+                        ]
+                    ]
+                )
+                styled = df.style.applymap(
+                    lambda v: (
+                        f"color: white; background-color: "
+                        f"{line_color_soft(str(v))}"
+                    ),
+                    subset=["Line"],
+                )
+                st.dataframe(styled, use_container_width=True)
             else:
                 st.info("No arrivals in selected time range or line.")
 
-# Render map at the bottom with Plotly instead of pydeck
+# Map at bottom with Plotly
 if st.session_state.get("last_stops") != selected_stops:
     st.session_state.last_stops = selected_stops
-    data = []
+    rows: list[dict] = []
     for stop in selected_stops:
-        for coords in stop_dict[stop]["Coordinates"]:
-            data.append({"lat": coords[0], "lon": coords[1], "stop_name": stop})
+        for lat, lon in stop_dict[stop]["Coordinates"]:
+            rows.append({"lat": lat, "lon": lon, "stop_name": stop})
 
-    df_map = pd.DataFrame(data)
-
-    center_lat = df_map["lat"].mean()
-    center_lon = df_map["lon"].mean()
-
+    df_map = pd.DataFrame(rows)
+    zoom = 15 if df_map["lat"].max() - df_map["lat"].min() < 0.05 else 12
     fig = px.scatter_mapbox(
         df_map,
         lat="lat",
         lon="lon",
-        size_max = 2000,
         hover_name="stop_name",
         text="stop_name",
-        zoom=15 if df_map["lat"].max() - df_map["lat"].min() < 0.05 else 12,
+        zoom=zoom,
         height=600,
     )
-
     fig.update_layout(
         mapbox_style="carto-darkmatter",
-        margin={"r":0,"t":0,"l":0,"b":0},
+        margin={"r": 0, "t": 0, "l": 0, "b": 0},
     )
-    fig.update_traces(marker=dict(size=20, color = 'red'))
-
+    fig.update_traces(marker=dict(size=20, color="red"))
     st.session_state.map_chart = fig
 
 st.markdown("## 🗺️ Stop Locations Map")
